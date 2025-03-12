@@ -2,12 +2,38 @@
 
 use candle_core::{Device, Result, Tensor};
 use candle_datasets::{batcher::IterResult2, Batcher};
+use clap::error::Error;
 use fancy_regex::{Captures, Regex};
 use rand::{rng, seq::SliceRandom};
+use regex::Regex as RegexStd;
+use serde_with::formats::Separator;
 use std::collections::HashMap;
 use std::fs;
 use std::rc::Rc;
 use tiktoken_rs::CoreBPE;
+
+fn split_keep<'a>(r: &RegexStd, text: &'a str) -> Vec<&'a str> {
+    let mut result = Vec::new();
+    let mut last = 0;
+
+    // Use find_iter instead of match_indices
+    for m in r.find_iter(text) {
+        let index = m.start();
+        let matched = m.as_str();
+
+        if last != index {
+            result.push(&text[last..index]);
+        }
+        result.push(matched);
+        last = index + matched.len();
+    }
+
+    if last < text.len() {
+        result.push(&text[last..]);
+    }
+
+    result
+}
 
 /// [Listing 2.1] Reading in a short story as text sample into Rust
 pub fn sample_read_text(verbose: bool) -> Result<String> {
@@ -22,16 +48,19 @@ pub fn sample_read_text(verbose: bool) -> Result<String> {
 /// [Listing 2.2] Creating a vocabulary
 pub fn sample_create_vocab() -> Result<HashMap<String, i32>> {
     let raw_text = sample_read_text(false)?;
-    let re = Regex::new(r#"([,.?_!"()']|--|\s)"#).unwrap();
-    let mut preprocessed: Vec<&str> = re.split(&raw_text[..]).map(|x| x.unwrap()).collect();
-    preprocessed.sort();
+    let re = RegexStd::new(r#"([,.?_!"()']|--|\s)"#).unwrap();
+    let splits = split_keep(&re, &raw_text);
 
-    let vocab: HashMap<String, i32> = HashMap::from_iter(
-        preprocessed
-            .iter()
-            .enumerate()
-            .map(|(idx, el)| (el.to_string(), idx as i32)),
-    );
+    let mut vocab: HashMap<String, i32> = HashMap::new();
+    let mut next_idx = 0;
+
+    for token in splits {
+        if !vocab.contains_key(token) {
+            vocab.insert(token.to_string(), next_idx);
+            next_idx += 1;
+        }
+    }
+
     Ok(vocab)
 }
 
@@ -65,18 +94,42 @@ impl SimpleTokenizerV1 {
     }
 
     /// Encode a text into its token ids.
-    pub fn encode(&self, text: &str) -> Vec<i32> {
-        let re = Regex::new(r#"([,.?_!"()']|--|\s)"#).unwrap();
-        let preprocessed: Vec<&str> = re.split(text).map(|x| x.unwrap()).collect();
+    pub fn encode(&self, text: &str) -> Result<Vec<i32>> {
+        let re = match Regex::new(r#"([,.?_!"()']|--|\s)"#) {
+            Ok(regex) => regex,
+            Err(err) => return Err(candle_core::Error::Msg(format!("Regex error: {}", err))),
+        };
+
+        // Process regex split results, converting errors
+        let split_results = re
+            .split(text)
+            .map(|res| {
+                res.map_err(|e| candle_core::Error::Msg(format!("Regex split error: {}", e)))
+            })
+            .collect::<std::result::Result<Vec<&str>, _>>()?;
+
+        // Filter out empty strings
+        let preprocessed: Vec<&str> = split_results
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        // Map the strings to integers, handling potential missing values and cloning the i32 values
         preprocessed
             .into_iter()
-            .map(|s| self.str_to_int.get(&String::from(s)).unwrap())
-            .cloned()
+            .map(|s| {
+                self.str_to_int
+                    .get(&String::from(s))
+                    .ok_or_else(|| {
+                        candle_core::Error::Msg(format!("Token not found in vocabulary: {}", s))
+                    })
+                    .map(|&i| i) // Dereference the i32 reference to get the value
+            })
             .collect()
     }
 
     /// Decode token ids into its text.
-    pub fn decode(&self, ids: Vec<i32>) -> String {
+    pub fn decode(&self, ids: &[i32]) -> String {
         let text_vec: Vec<String> = ids
             .iter()
             .map(|i| self.int_to_str.get(i).unwrap())
@@ -141,10 +194,13 @@ impl SimpleTokenizerV2 {
 
     /// Encode a text into its token ids.
     pub fn encode(&self, text: &str) -> Vec<i32> {
-        let re = Regex::new(r#"([,.?_!"()']|--|\s)"#).unwrap();
-        let preprocessed: Vec<&str> = re.split(text).map(|x| x.unwrap()).collect();
+        let re = RegexStd::new(r#"([,.?_!"()']|--|\s)"#).unwrap();
+
+        let preprocessed = split_keep(&re, text);
+
         preprocessed
             .into_iter()
+            .filter(|s| !s.trim().is_empty()) // Filtra gli spazi vuoti
             .map(|s| {
                 self.str_to_int
                     .get(&String::from(s))
@@ -155,7 +211,7 @@ impl SimpleTokenizerV2 {
     }
 
     /// Decode token ids into its text.
-    pub fn decode(&self, ids: Vec<i32>) -> String {
+    pub fn decode(&self, ids: &[i32]) -> String {
         let text_vec: Vec<String> = ids
             .iter()
             .map(|i| self.int_to_str.get(i).unwrap())
@@ -471,14 +527,26 @@ mod tests {
     }
 
     #[rstest]
-    fn test_encode(vocab: HashMap<&str, i32>) -> Result<()> {
-        let tokenizer = SimpleTokenizerV1::from_vocab(vocab);
-        let token_ids = tokenizer.encode("this is a test");
+    fn test_encode() -> Result<(), Box<dyn std::error::Error>> {
+        // Create a vocabulary map
+        let mut vocab = HashMap::new();
+        vocab.insert("this", 1);
+        vocab.insert("is", 2);
+        vocab.insert("a", 3);
+        vocab.insert("test", 4);
 
+        // Create tokenizer from vocabulary
+        let tokenizer = SimpleTokenizerV1::from_vocab(vocab);
+
+        // Encode a test string and unwrap the Result to get the Vec<i32>
+        let token_ids = tokenizer.encode("this is a test")?;
+
+        // Verify the encoded tokens match expected values
         assert_eq!(token_ids[0], 1);
         assert_eq!(token_ids[1], 2);
         assert_eq!(token_ids[2], 3);
         assert_eq!(token_ids[3], 4);
+
         Ok(())
     }
 
@@ -488,7 +556,7 @@ mod tests {
         let tokenizer = SimpleTokenizerV1::from_vocab(vocab);
 
         let token_ids = vec![1, 2, 3, 4, 5];
-        let text = tokenizer.decode(token_ids);
+        let text = tokenizer.decode(&token_ids);
 
         assert_eq!(text, "this is a test.");
         Ok(())
@@ -513,7 +581,7 @@ mod tests {
         let tokenizer = SimpleTokenizerV2::from_vocab(vocab);
 
         let token_ids = vec![1, 2, 3, 4, 5, 6];
-        let text = tokenizer.decode(token_ids);
+        let text = tokenizer.decode(&token_ids);
 
         assert_eq!(text, "this is a test <|unk|> <|endoftext|>");
         Ok(())
