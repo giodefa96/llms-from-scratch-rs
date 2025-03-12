@@ -47,6 +47,7 @@ pub fn sample_read_text(verbose: bool) -> Result<String> {
 
 /// [Listing 2.2] Creating a vocabulary
 pub fn sample_create_vocab() -> Result<HashMap<String, i32>> {
+pub fn sample_create_vocab() -> Result<HashMap<String, i32>> {
     let raw_text = sample_read_text(false)?;
     let re = RegexStd::new(r#"([,.?_!"()']|--|\s)"#).unwrap();
     let splits = split_keep(&re, &raw_text);
