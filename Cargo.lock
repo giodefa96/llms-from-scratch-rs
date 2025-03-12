@@ -2329,6 +2329,7 @@ dependencies = [
  "plotly",
  "polars",
  "rand 0.9.0",
+ "regex",
  "reqwest",
  "rstest",
  "serde",
