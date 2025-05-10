@@ -51,11 +51,17 @@ pub fn sample_create_vocab() -> Result<HashMap<String, i32>> {
     let re = RegexStd::new(r#"([,.?_!"()']|--|\s)"#).unwrap();
     let splits = split_keep(&re, &raw_text);
 
-    let vocab: HashMap<i32, String> = HashMap::from_iter(
+    let preprocessed: Vec<&str> = splits
+        .into_iter()
+        .filter(|s| !s.trim().is_empty())
+        .collect();
+
+    // Create a HashMap with String keys and i32 values
+    let vocab: HashMap<String, i32> = HashMap::from_iter(
         preprocessed
             .iter()
             .enumerate()
-            .map(|(idx, el)| (idx as i32, el.to_string())),
+            .map(|(idx, el)| (el.to_string(), idx as i32)),
     );
     Ok(vocab)
 }
@@ -676,10 +682,6 @@ mod tests {
             count += 1;
         }
         assert!(!data_loader.is_empty());
-        assert_eq!(data_loader.len(), count);
-        Ok(())
-    }
-}
         assert_eq!(data_loader.len(), count);
         Ok(())
     }
